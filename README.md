@@ -29,6 +29,11 @@ of the respiratory system.
   (understand → identify → retrieve → visualize → update → verify).
 - **Show Airflow** — animated particles that follow the *actual* bronchial
   pathways (trachea → bronchi → bronchioles → alveoli), not a random path.
+- **Breathe** — a breathing simulation: lungs expand and the diaphragm descends
+  on inhalation, then contract and rise on exhalation, with airflow direction
+  reversing to match the breath cycle.
+- **Diaphragm** — a dome-shaped muscle below the lungs that animates with the
+  breathing cycle.
 - **Teach Me** — a guided, step-by-step tour of the respiratory system with
   automatic camera/highlight changes.
 - Futuristic dark UI with glassmorphism and cyan/blue glow.

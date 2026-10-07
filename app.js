@@ -17,6 +17,7 @@ const STRUCTURES = {
   alveoli:      { color: 0xf472b6, label: 'Alveoli',      desc: 'Alveoli are tiny air sacs (~300 million per lung) wrapped in capillaries. This is where gas exchange happens: oxygen enters the blood and carbon dioxide leaves it.' },
   leftLung:     { color: 0x34d399, label: 'Left Lung',    desc: 'The left lung has two lobes and a cardiac notch to make room for the heart. It receives air via the left main bronchus.' },
   rightLung:    { color: 0x34d399, label: 'Right Lung',   desc: 'The right lung has three lobes and is larger than the left. It receives air via the right main bronchus.' },
+  diaphragm:    { color: 0x7c93b5, label: 'Diaphragm',    desc: 'The diaphragm is a dome-shaped muscle below the lungs. It contracts and flattens on inhalation (pulling air in) and relaxes upward on exhalation (pushing air out).' },
 };
 
 // ---------- Scene setup ----------
@@ -116,6 +117,8 @@ function tube(points, radius, color, name) {
 
 // ---------- Build the lungs (realistic shape with lobes) ----------
 const lungMaterials = [];   // materials to fade for the lung layer
+const lungShells = [];      // shell meshes to scale during breathing
+const lungGroups = {};      // side -> group (for breathing scale)
 
 function buildLung(side) {
   const sign = side === 'leftLung' ? -1 : 1;
@@ -151,6 +154,8 @@ function buildLung(side) {
   g.add(shell);
   register(side, shell);
   lungMaterials.push(shellMat);
+  lungShells.push(shell);
+  lungGroups[side] = g;
 
   // inner glow core
   const coreMat = makeMat(STRUCTURES[side].color, { opacity: 0.06, emissiveIntensity: 0.12 });
@@ -182,6 +187,19 @@ function buildLung(side) {
 }
 buildLung('leftLung');
 buildLung('rightLung');
+
+// ---------- Diaphragm (dome-shaped muscle below the lungs) ----------
+const diaphragmGroup = new THREE.Group();
+scene.add(diaphragmGroup);
+const diaphragmMat = makeMat(STRUCTURES.diaphragm.color, { opacity: 0.28, roughness: 0.6, emissiveIntensity: 0.08 });
+const diaphragmGeo = new THREE.SphereGeometry(2.6, 48, 24, 0, Math.PI * 2, 0, Math.PI * 0.42);
+const diaphragm = new THREE.Mesh(diaphragmGeo, diaphragmMat);
+diaphragm.scale.set(1.0, 0.55, 0.8);
+diaphragm.position.set(0, -1.9, 0);
+diaphragm.rotation.x = Math.PI;
+diaphragmGroup.add(diaphragm);
+register('diaphragm', diaphragm);
+const diaphragmBaseY = -1.9;
 
 // ---------- Build the connected airway tree ----------
 // Hierarchy: trachea -> main bronchi -> lobar bronchi -> segmental/bronchioles -> alveolar ducts -> alveoli
@@ -297,6 +315,7 @@ function labelPos(name) {
   else if (name === 'alveoli') p.set(0, -1.4, 0);
   else if (name === 'leftLung') p.set(-1.55, 0.3, 0);
   else if (name === 'rightLung') p.set(1.55, 0.3, 0);
+  else if (name === 'diaphragm') p.set(0, -2.1, 0);
   return p;
 }
 Object.keys(STRUCTURES).forEach((name) => {
@@ -384,6 +403,7 @@ const particleGeo = new THREE.SphereGeometry(0.035, 8, 8);
 const particleMat = new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.9 });
 
 let airflowActive = false;
+let airflowDirection = 1; // 1 = inhale (root->alveoli), -1 = exhale (alveoli->root)
 
 function spawnParticle() {
   const p = new THREE.Mesh(particleGeo, particleMat);
@@ -399,9 +419,12 @@ function updateAirflow(dt) {
   if (!airflowActive) { particleGroup.visible = false; return; }
   particleGroup.visible = true;
   particles.forEach((p) => {
-    p.userData.t += p.userData.speed * dt;
+    p.userData.t += p.userData.speed * dt * airflowDirection;
     if (p.userData.t > 1) {
       p.userData.t = 0;
+      p.userData.curveIndex = Math.floor(Math.random() * airflowCurves.length);
+    } else if (p.userData.t < 0) {
+      p.userData.t = 1;
       p.userData.curveIndex = Math.floor(Math.random() * airflowCurves.length);
     }
     const curve = airflowCurves[p.userData.curveIndex];
@@ -410,6 +433,43 @@ function updateAirflow(dt) {
     const scale = 0.5 + 0.7 * Math.sin(p.userData.t * Math.PI);
     p.scale.setScalar(scale);
   });
+}
+
+// ---------- Breathing simulation ----------
+let breathing = false;
+let breathPhase = 0;   // 0..1 (0 = start inhale, 0.5 = full inhale, 1 = end exhale)
+let breathDirection = 1; // 1 = inhaling, -1 = exhaling
+
+function startBreathing() {
+  breathing = true;
+  document.getElementById('btn-breathe').classList.add('active');
+}
+function stopBreathing() {
+  breathing = false;
+  document.getElementById('btn-breathe').classList.remove('active');
+  // ease back to rest
+  lungShells.forEach((s) => s.scale.set(1.0, 1.85, 0.82));
+  diaphragm.position.y = diaphragmBaseY;
+}
+
+function updateBreathing(dt) {
+  if (!breathing) return;
+  // full cycle ~4s
+  breathPhase += (dt / 4) * breathDirection;
+  if (breathPhase >= 1) { breathPhase = 1; breathDirection = -1; }
+  if (breathPhase <= 0) { breathPhase = 0; breathDirection = 1; }
+
+  // 0 -> inhale (expand), 0.5 -> full, 1 -> exhale (contract)
+  const expand = Math.sin(breathPhase * Math.PI); // 0 at ends, 1 at mid
+  const scale = 1 + expand * 0.06;
+  lungShells.forEach((s) => {
+    s.scale.set(1.0 * scale, 1.85 * scale, 0.82 * scale);
+  });
+  // diaphragm descends on inhale, rises on exhale
+  diaphragm.position.y = diaphragmBaseY - expand * 0.35;
+
+  // airflow direction follows breathing
+  airflowDirection = breathDirection;
 }
 
 // ---------- Agent ----------
@@ -491,7 +551,9 @@ function matchIntent(text) {
   if (/show.*lung|lung.*on|restore.*lung/.test(t)) return 'showLungs';
   if (/inside|enter.*lung|take me inside|airway view/.test(t)) return 'inside';
   if (/lung/.test(t)) return 'leftLung';
-  if (/airflow|air travel|path air|how air|breathe|inhale/.test(t)) return 'airflow';
+  if (/diaphragm/.test(t)) return 'diaphragm';
+  if (/breathe|breathing|inhale|exhale|respirat/.test(t)) return 'breathe';
+  if (/airflow|air travel|path air|how air/.test(t)) return 'airflow';
   if (/teach|lesson|tour|guide/.test(t)) return 'teach';
   return null;
 }
@@ -503,6 +565,7 @@ const RESPONSES = {
   alveoli: 'Alveoli are tiny air sacs — about 300 million per lung — wrapped in a dense web of capillaries. This is where gas exchange happens: oxygen diffuses into the blood and carbon dioxide diffuses out. I\'ve highlighted the alveolar clusters.',
   leftLung: 'The left lung has two lobes and a cardiac notch to make room for the heart. It receives air through the left main bronchus. I\'ve highlighted it.',
   rightLung: 'The right lung has three lobes and is larger than the left. It receives air through the right main bronchus. I\'ve highlighted it.',
+  diaphragm: 'The diaphragm is a dome-shaped muscle below the lungs. When it contracts and flattens, it pulls air into the lungs; when it relaxes upward, it pushes air out. I\'ve highlighted it.',
 };
 
 async function handleUserInput(text) {
@@ -516,6 +579,12 @@ async function handleUserInput(text) {
   }
   if (intent === 'teach') {
     startTeach();
+    return;
+  }
+  if (intent === 'breathe') {
+    startBreathing();
+    startAirflow();
+    await runAgentSteps('diaphragm', 'I\'ve started the breathing simulation. Watch the lungs expand and the diaphragm descend as air flows in, then contract and rise as air flows out.');
     return;
   }
   if (intent === 'hideLungs') {
@@ -567,6 +636,9 @@ function stopAirflow() {
 document.getElementById('btn-airflow').addEventListener('click', () => {
   airflowActive ? stopAirflow() : startAirflow();
 });
+document.getElementById('btn-breathe').addEventListener('click', () => {
+  if (breathing) { stopBreathing(); } else { startBreathing(); startAirflow(); }
+});
 
 // ---------- Teach Me ----------
 const LESSONS = [
@@ -617,6 +689,7 @@ function stopTeach() {
 // ---------- Reset ----------
 document.getElementById('btn-reset').addEventListener('click', () => {
   stopAirflow();
+  stopBreathing();
   stopTeach();
   clearHighlights();
   setLungLayer(true);
@@ -689,6 +762,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.1);
   controls.update();
   updateAirflow(dt);
+  updateBreathing(dt);
   updateLungOpacity();
   composer.render();
   labelRenderer.render(scene, camera);
