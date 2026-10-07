@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>🫁 Talk to Your CT Scan — Powered by Agent8088</title>
+<link rel="stylesheet" href="style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="app">
+
+    <!-- 3D viewport -->
+    <div id="viewport">
+      <div id="titlebar">
+        <h1>🫁 Talk to Your CT Scan</h1>
+        <div class="powered">POWERED BY <span>AGENT8088</span></div>
+      </div>
+
+      <div id="toolbar">
+        <button id="btn-airflow" class="glass-btn">💨 Show Airflow</button>
+        <button id="btn-teach" class="glass-btn">🎓 Teach Me</button>
+        <button id="btn-reset" class="glass-btn">⟲ Reset</button>
+        <button id="btn-labels" class="glass-btn">🏷 Labels</button>
+      </div>
+
+      <div id="legend">
+        <div class="legend-item"><span class="dot" style="background:#22d3ee"></span> Trachea</div>
+        <div class="legend-item"><span class="dot" style="background:#38bdf8"></span> Bronchi</div>
+        <div class="legend-item"><span class="dot" style="background:#818cf8"></span> Bronchioles</div>
+        <div class="legend-item"><span class="dot" style="background:#f472b6"></span> Alveoli</div>
+        <div class="legend-item"><span class="dot" style="background:#34d399"></span> Lungs</div>
+      </div>
+
+      <div id="selection-info" class="hidden"></div>
+
+      <div id="disclaimer">Educational demo — not a medical diagnostic tool.</div>
+    </div>
+
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <div id="chat-panel" class="glass">
+        <div class="panel-title">🤖 Agent8088</div>
+        <div id="chat-log"></div>
+        <div id="teach-controls" class="hidden">
+          <div id="teach-progress"></div>
+          <button id="btn-next" class="glass-btn">Next →</button>
+        </div>
+        <div id="chat-input-row">
+          <input id="chat-input" type="text" placeholder="Ask: “Show me the bronchi”" autocomplete="off" />
+          <button id="btn-send" class="glass-btn">Send</button>
+        </div>
+        <div id="quick-prompts">
+          <button class="chip">Show me the bronchi</button>
+          <button class="chip">Where does gas exchange happen?</button>
+          <button class="chip">Show me the path air takes</button>
+          <button class="chip">Explain the alveoli</button>
+        </div>
+      </div>
+
+      <div id="activity-panel" class="glass">
+        <div class="panel-title">AGENT ACTIVITY</div>
+        <ul id="activity-list">
+          <li class="idle">Waiting for a request…</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
