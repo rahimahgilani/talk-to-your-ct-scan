@@ -15,8 +15,8 @@ const STRUCTURES = {
   bronchi:      { color: 0x38bdf8, label: 'Bronchi',      desc: 'The main bronchi split into lobar bronchi (three on the right, two on the left) and then segmental bronchi, conducting air deeper into each lobe of the lungs.' },
   bronchioles:  { color: 0x818cf8, label: 'Bronchioles',  desc: 'Bronchioles are the smallest conducting airways (under ~1 mm). They branch repeatedly and end in terminal bronchioles that deliver air to the alveoli.' },
   alveoli:      { color: 0xf472b6, label: 'Alveoli',      desc: 'Alveoli are tiny air sacs (~300 million per lung) wrapped in capillaries. This is where gas exchange happens: oxygen enters the blood and carbon dioxide leaves it.' },
-  leftLung:     { color: 0x34d399, label: 'Left Lung',    desc: 'The left lung has two lobes and a cardiac notch to make room for the heart. It receives air via the left main bronchus.' },
-  rightLung:    { color: 0x34d399, label: 'Right Lung',   desc: 'The right lung has three lobes and is larger than the left. It receives air via the right main bronchus.' },
+  leftLung:     { color: 0x038103, label: 'Left Lung',    desc: 'The left lung has two lobes and a cardiac notch to make room for the heart. It receives air via the left main bronchus.' },
+  rightLung:    { color: 0x038103, label: 'Right Lung',   desc: 'The right lung has three lobes and is larger than the left. It receives air via the right main bronchus.' },
   diaphragm:    { color: 0x7c93b5, label: 'Diaphragm',    desc: 'The diaphragm is a dome-shaped muscle below the lungs. It contracts and flattens on inhalation (pulling air in) and relaxes upward on exhalation (pushing air out).' },
 };
 
@@ -120,34 +120,60 @@ const lungMaterials = [];   // materials to fade for the lung layer
 const lungShells = [];      // shell meshes to scale during breathing
 const lungGroups = {};      // side -> group (for breathing scale)
 
-function buildLung(side) {
-  const sign = side === 'leftLung' ? -1 : 1;
-  const geo = new THREE.SphereGeometry(1, 72, 48);
+// Radius of the lung cross-section at a given height (conical profile)
+function lungRadiusAt(y) {
+  return 0.40 + 0.60 * smoothstep(1.0, -0.55, y);
+}
+
+function makeLungGeometry(side) {
+  const isLeft = side === 'leftLung';
+  const sign = isLeft ? -1 : 1;
+  const geo = new THREE.SphereGeometry(1, 96, 64);
   const pos = geo.attributes.position;
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
     v.fromBufferAttribute(pos, i);
     const x = v.x, y = v.y, z = v.z;
-    // taper toward the apex (top)
-    const apex = 1 - 0.55 * smoothstep(0.1, 1.0, y);
-    // widen the base (bottom)
-    const base = 1 + 0.15 * smoothstep(-1.0, -0.3, y);
-    // flatten the medial surface (facing the heart)
-    const medial = 1 - 0.42 * smoothstep(0.0, 1.0, -sign * x);
-    // cardiac notch on the left lung (lower medial)
+
+    // Conical vertical profile: narrow rounded apex, broad base
+    const R = lungRadiusAt(y);
+
+    // Medial concavity (mediastinal surface facing the heart), strongest at the hilum.
+    // The medial side faces the center, i.e. the -sign direction in local space.
+    const medialFactor = 1 - 0.30 * smoothstep(0.0, 1.0, -sign * x) * (0.7 + 0.3 * (1 - Math.abs(y)));
+
+    // Cardiac notch (left lung, lower medial border)
     let cardiac = 1;
-    if (side === 'leftLung') {
-      cardiac = 1 - 0.6 * smoothstep(0.0, 1.0, x) * smoothstep(-1.0, -0.15, y);
+    if (isLeft) {
+      cardiac = 1 - 0.45 * smoothstep(0.0, 1.0, -sign * x) * smoothstep(-1.0, -0.05, y);
     }
-    const r = apex * base * medial * cardiac;
-    pos.setXYZ(i, sign * Math.abs(x) * r, y, z * r);
+
+    // Lingula (left lung): tongue-like medial extension of the upper lobe
+    let lingula = 0;
+    if (isLeft) {
+      lingula = 0.16 * smoothstep(0.4, -0.6, y) * smoothstep(0.0, 1.0, x);
+    }
+
+    // Anterior-posterior flattening (lungs are flatter front-to-back)
+    const depth = 0.85;
+
+    // Slight base concavity (diaphragmatic surface)
+    const baseLift = 0.10 * smoothstep(-1.0, -0.55, y) * (1 - Math.abs(x) * 0.5);
+
+    pos.setXYZ(i, x * R * medialFactor * cardiac + lingula, y - baseLift, z * R * depth);
   }
   geo.computeVertexNormals();
+  return geo;
+}
+
+function buildLung(side) {
+  const sign = side === 'leftLung' ? -1 : 1;
+  const geo = makeLungGeometry(side);
 
   const g = new THREE.Group();
 
   // translucent outer shell
-  const shellMat = makeMat(STRUCTURES[side].color, { opacity: 0.16, roughness: 0.5, emissiveIntensity: 0.05 });
+  const shellMat = makeMat(STRUCTURES[side].color, { opacity: 0.30, roughness: 0.45, emissiveIntensity: 0.12 });
   const shell = new THREE.Mesh(geo, shellMat);
   shell.scale.set(1.0, 1.85, 0.82);
   shell.position.set(sign * 1.55, 0.3, 0);
@@ -157,24 +183,25 @@ function buildLung(side) {
   lungShells.push(shell);
   lungGroups[side] = g;
 
-  // inner glow core
-  const coreMat = makeMat(STRUCTURES[side].color, { opacity: 0.06, emissiveIntensity: 0.12 });
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.9, 32, 24), coreMat);
-  core.scale.copy(shell.scale);
+  // inner glow core (same shape, slightly smaller)
+  const coreMat = makeMat(STRUCTURES[side].color, { opacity: 0.10, emissiveIntensity: 0.16 });
+  const core = new THREE.Mesh(geo.clone(), coreMat);
+  core.scale.set(0.92, 1.70, 0.75);
   core.position.copy(shell.position);
   g.add(core);
   register(side, core);
   lungMaterials.push(coreMat);
 
-  // lobe fissures (subtle darker lines on the surface)
-  const fissureMat = new THREE.MeshBasicMaterial({ color: 0x0a1a30, transparent: true, opacity: 0.45, depthWrite: false });
-  fissureMat.userData.baseOpacity = 0.45;
+  // lobe fissures (oblique, diagonal lines on the surface)
+  const fissureMat = new THREE.MeshBasicMaterial({ color: 0x052e05, transparent: true, opacity: 0.65, depthWrite: false });
+  fissureMat.userData.baseOpacity = 0.65;
   lungMaterials.push(fissureMat);
   const fissures = side === 'rightLung'
-    ? [{ y: 0.35, tilt: 0.0 }, { y: -0.25, tilt: 0.35 }]
-    : [{ y: 0.05, tilt: 0.3 }];
+    ? [{ y: 0.30, tilt: 0.55 }, { y: -0.30, tilt: 0.12 }]   // oblique + horizontal fissure
+    : [{ y: 0.05, tilt: 0.55 }];                              // oblique fissure
   fissures.forEach((f) => {
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.92, 0.012, 8, 64), fissureMat);
+    const r = lungRadiusAt(f.y);
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(r, 0.02, 8, 64), fissureMat);
     ring.scale.set(1.0, 1.85, 0.82);
     ring.position.set(sign * 1.55, 0.3 + f.y, 0);
     ring.rotation.z = f.tilt;
