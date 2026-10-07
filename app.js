@@ -11,11 +11,11 @@ import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer
    ============================================================ */
 
 const STRUCTURES = {
-  trachea:      { color: 0x22d3ee, label: 'Trachea',      desc: 'The trachea (windpipe) is a rigid tube of cartilage that carries inhaled air from the larynx down into the chest, where it splits into the two main bronchi.' },
-  bronchi:      { color: 0x38bdf8, label: 'Main Bronchi', desc: 'The main (primary) bronchi are the two large branches of the trachea — one to each lung. They conduct air into the lungs and further divide into smaller bronchi.' },
+  trachea:      { color: 0x22d3ee, label: 'Trachea',      desc: 'The trachea (windpipe) is a rigid tube of cartilage that carries inhaled air from the larynx down into the chest, where it splits into the two main bronchi at the carina.' },
+  bronchi:      { color: 0x38bdf8, label: 'Bronchi',      desc: 'The main bronchi split into lobar bronchi (three on the right, two on the left) and then segmental bronchi, conducting air deeper into each lobe of the lungs.' },
   bronchioles:  { color: 0x818cf8, label: 'Bronchioles',  desc: 'Bronchioles are the smallest conducting airways (under ~1 mm). They branch repeatedly and end in terminal bronchioles that deliver air to the alveoli.' },
   alveoli:      { color: 0xf472b6, label: 'Alveoli',      desc: 'Alveoli are tiny air sacs (~300 million per lung) wrapped in capillaries. This is where gas exchange happens: oxygen enters the blood and carbon dioxide leaves it.' },
-  leftLung:     { color: 0x34d399, label: 'Left Lung',    desc: 'The left lung has two lobes and is slightly smaller to make room for the heart. It receives air via the left main bronchus.' },
+  leftLung:     { color: 0x34d399, label: 'Left Lung',    desc: 'The left lung has two lobes and a cardiac notch to make room for the heart. It receives air via the left main bronchus.' },
   rightLung:    { color: 0x34d399, label: 'Right Lung',   desc: 'The right lung has three lobes and is larger than the left. It receives air via the right main bronchus.' },
 };
 
@@ -47,13 +47,13 @@ composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(viewport.clientWidth, viewport.clientHeight), 0.55, 0.6, 0.85);
 composer.addPass(bloom);
 
-// Controls
+// Controls — allow entering the lung
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.minDistance = 4;
-controls.maxDistance = 40;
-controls.target.set(0, 0.5, 0);
+controls.minDistance = 1.2;
+controls.maxDistance = 45;
+controls.target.set(0, 0.3, 0);
 
 // Lights
 scene.add(new THREE.AmbientLight(0x334466, 1.4));
@@ -74,14 +74,14 @@ stars.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
 const starMat = new THREE.PointsMaterial({ color: 0x88bbee, size: 0.06, transparent: true, opacity: 0.7 });
 scene.add(new THREE.Points(stars, starMat));
 
-// ---------- Build the anatomy ----------
-const groups = {};       // structure name -> THREE.Group
-const meshes = {};       // structure name -> array of meshes (for highlight)
-const labels = {};       // structure name -> CSS2DObject
-const labelVisible = true;
+// ---------- Helpers ----------
+function smoothstep(a, b, x) {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
 
 function makeMat(color, opts = {}) {
-  return new THREE.MeshStandardMaterial({
+  const mat = new THREE.MeshStandardMaterial({
     color,
     roughness: opts.roughness ?? 0.35,
     metalness: opts.metalness ?? 0.15,
@@ -90,9 +90,15 @@ function makeMat(color, opts = {}) {
     emissive: color,
     emissiveIntensity: opts.emissiveIntensity ?? 0.18,
   });
+  mat.userData.baseOpacity = opts.opacity ?? 0.92;
+  return mat;
 }
 
-function register(name, mesh, group) {
+const groups = {};       // structure name -> THREE.Group
+const meshes = {};       // structure name -> array of meshes (for highlight)
+const labels = {};       // structure name -> CSS2DObject
+
+function register(name, mesh) {
   if (!groups[name]) { groups[name] = new THREE.Group(); scene.add(groups[name]); }
   if (!meshes[name]) meshes[name] = [];
   groups[name].add(mesh);
@@ -100,106 +106,181 @@ function register(name, mesh, group) {
   mesh.userData.structure = name;
 }
 
-// --- Lungs (translucent shells) ---
+function tube(points, radius, color, name) {
+  const curve = new THREE.CatmullRomCurve3(points);
+  const geo = new THREE.TubeGeometry(curve, 32, radius, 12, false);
+  const mesh = new THREE.Mesh(geo, makeMat(color));
+  register(name, mesh);
+  return mesh;
+}
+
+// ---------- Build the lungs (realistic shape with lobes) ----------
+const lungMaterials = [];   // materials to fade for the lung layer
+
 function buildLung(side) {
+  const sign = side === 'leftLung' ? -1 : 1;
+  const geo = new THREE.SphereGeometry(1, 72, 48);
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const x = v.x, y = v.y, z = v.z;
+    // taper toward the apex (top)
+    const apex = 1 - 0.55 * smoothstep(0.1, 1.0, y);
+    // widen the base (bottom)
+    const base = 1 + 0.15 * smoothstep(-1.0, -0.3, y);
+    // flatten the medial surface (facing the heart)
+    const medial = 1 - 0.42 * smoothstep(0.0, 1.0, -sign * x);
+    // cardiac notch on the left lung (lower medial)
+    let cardiac = 1;
+    if (side === 'leftLung') {
+      cardiac = 1 - 0.6 * smoothstep(0.0, 1.0, x) * smoothstep(-1.0, -0.15, y);
+    }
+    const r = apex * base * medial * cardiac;
+    pos.setXYZ(i, sign * Math.abs(x) * r, y, z * r);
+  }
+  geo.computeVertexNormals();
+
   const g = new THREE.Group();
-  const mat = makeMat(STRUCTURES[side].color, { opacity: 0.16, roughness: 0.5, emissiveIntensity: 0.05 });
-  const geo = new THREE.SphereGeometry(1, 48, 32);
-  const shell = new THREE.Mesh(geo, mat);
-  shell.scale.set(1.15, 1.9, 0.85);
-  shell.position.x = side === 'leftLung' ? -1.7 : 1.7;
-  shell.position.y = 0.4;
+
+  // translucent outer shell
+  const shellMat = makeMat(STRUCTURES[side].color, { opacity: 0.16, roughness: 0.5, emissiveIntensity: 0.05 });
+  const shell = new THREE.Mesh(geo, shellMat);
+  shell.scale.set(1.0, 1.85, 0.82);
+  shell.position.set(sign * 1.55, 0.3, 0);
   g.add(shell);
+  register(side, shell);
+  lungMaterials.push(shellMat);
+
   // inner glow core
-  const core = new THREE.Mesh(
-    new THREE.SphereGeometry(0.9, 32, 24),
-    makeMat(STRUCTURES[side].color, { opacity: 0.06, emissiveIntensity: 0.12 })
-  );
+  const coreMat = makeMat(STRUCTURES[side].color, { opacity: 0.06, emissiveIntensity: 0.12 });
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.9, 32, 24), coreMat);
   core.scale.copy(shell.scale);
   core.position.copy(shell.position);
   g.add(core);
-  register(side, shell, g);
-  register(side, core, g);
+  register(side, core);
+  lungMaterials.push(coreMat);
+
+  // lobe fissures (subtle darker lines on the surface)
+  const fissureMat = new THREE.MeshBasicMaterial({ color: 0x0a1a30, transparent: true, opacity: 0.45, depthWrite: false });
+  fissureMat.userData.baseOpacity = 0.45;
+  lungMaterials.push(fissureMat);
+  const fissures = side === 'rightLung'
+    ? [{ y: 0.35, tilt: 0.0 }, { y: -0.25, tilt: 0.35 }]
+    : [{ y: 0.05, tilt: 0.3 }];
+  fissures.forEach((f) => {
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.92, 0.012, 8, 64), fissureMat);
+    ring.scale.set(1.0, 1.85, 0.82);
+    ring.position.set(sign * 1.55, 0.3 + f.y, 0);
+    ring.rotation.z = f.tilt;
+    ring.userData.structure = side;
+    g.add(ring);
+  });
+
+  scene.add(g);
   return g;
 }
 buildLung('leftLung');
 buildLung('rightLung');
 
-// --- Airway tree (trachea -> bronchi -> bronchioles -> alveoli) ---
-const airwayRoot = new THREE.Group();
-scene.add(airwayRoot);
+// ---------- Build the connected airway tree ----------
+// Hierarchy: trachea -> main bronchi -> lobar bronchi -> segmental/bronchioles -> alveolar ducts -> alveoli
+const treePaths = [];   // full paths (root -> terminal) for airflow
+const terminals = [];   // terminal endpoints for alveoli
 
-function tube(points, radius, color, name) {
-  const curve = new THREE.CatmullRomCurve3(points);
-  const geo = new THREE.TubeGeometry(curve, 48, radius, 16, false);
-  const mesh = new THREE.Mesh(geo, makeMat(color));
-  register(name, mesh, airwayRoot);
-  return mesh;
-}
+const tracheaTop = new THREE.Vector3(0, 3.6, 0);
+const carina = new THREE.Vector3(0, 1.0, 0);
 
 // Trachea
-const tracheaPts = [
-  new THREE.Vector3(0, 3.4, 0),
-  new THREE.Vector3(0, 2.6, 0),
-  new THREE.Vector3(0, 1.8, 0),
-  new THREE.Vector3(0, 1.0, 0),
-];
-tube(tracheaPts, 0.34, STRUCTURES.trachea.color, 'trachea');
+tube([tracheaTop, new THREE.Vector3(0, 2.6, 0), new THREE.Vector3(0, 1.8, 0), carina], 0.34, STRUCTURES.trachea.color, 'trachea');
 
-// Main bronchi (split at carina ~ y=1.0)
-const carina = new THREE.Vector3(0, 1.0, 0);
-const leftBronchiPts = [carina, new THREE.Vector3(-0.7, 0.55, 0), new THREE.Vector3(-1.5, 0.15, 0)];
-const rightBronchiPts = [carina, new THREE.Vector3(0.7, 0.55, 0), new THREE.Vector3(1.5, 0.15, 0)];
-tube(leftBronchiPts, 0.24, STRUCTURES.bronchi.color, 'bronchi');
-tube(rightBronchiPts, 0.24, STRUCTURES.bronchi.color, 'bronchi');
+// Main bronchi (right is steeper/more vertical, left more horizontal due to the heart)
+const rightMainEnd = new THREE.Vector3(0.9, 0.55, 0.15);
+const leftMainEnd = new THREE.Vector3(-0.9, 0.6, -0.1);
+tube([carina, new THREE.Vector3(0.45, 0.78, 0.08), rightMainEnd], 0.26, STRUCTURES.bronchi.color, 'bronchi');
+tube([carina, new THREE.Vector3(-0.45, 0.8, -0.05), leftMainEnd], 0.24, STRUCTURES.bronchi.color, 'bronchi');
 
-// Bronchioles — recursive branching
-const bronchioleEnds = [];
-function branch(start, dir, radius, depth, maxDepth) {
-  if (depth > maxDepth) { bronchioleEnds.push(start.clone()); return; }
-  const len = 0.9 - depth * 0.12;
+// Lobar bronchi — right: upper/middle/lower; left: upper/lower
+const rUpperEnd  = new THREE.Vector3(1.5, 0.95, 0.35);
+const rMiddleEnd = new THREE.Vector3(1.7, 0.35, 0.1);
+const rLowerEnd  = new THREE.Vector3(1.4, -0.15, 0.2);
+const lUpperEnd  = new THREE.Vector3(-1.5, 0.9, -0.3);
+const lLowerEnd  = new THREE.Vector3(-1.4, -0.1, -0.15);
+
+tube([rightMainEnd, new THREE.Vector3(1.2, 0.75, 0.25), rUpperEnd], 0.18, STRUCTURES.bronchi.color, 'bronchi');
+tube([rightMainEnd, new THREE.Vector3(1.3, 0.45, 0.12), rMiddleEnd], 0.16, STRUCTURES.bronchi.color, 'bronchi');
+tube([rightMainEnd, new THREE.Vector3(1.15, 0.2, 0.18), rLowerEnd], 0.18, STRUCTURES.bronchi.color, 'bronchi');
+tube([leftMainEnd, new THREE.Vector3(-1.2, 0.75, -0.2), lUpperEnd], 0.17, STRUCTURES.bronchi.color, 'bronchi');
+tube([leftMainEnd, new THREE.Vector3(-1.15, 0.25, -0.12), lLowerEnd], 0.17, STRUCTURES.bronchi.color, 'bronchi');
+
+// Recursive branching below each lobar bronchus (segmental -> bronchioles -> terminal)
+function branch(start, dir, radius, depth, maxDepth, pathSoFar) {
+  const len = 0.85 - depth * 0.1;
   const end = start.clone().add(dir.clone().multiplyScalar(len));
-  const pts = [start.clone(), end.clone()];
-  tube(pts, radius, STRUCTURES.bronchioles.color, 'bronchioles');
-  const spread = 0.55;
-  const d1 = dir.clone().normalize();
-  const d2 = dir.clone().normalize();
-  const up = new THREE.Vector3(0, 1, 0);
-  const perp = new THREE.Vector3().crossVectors(d1, up).normalize();
-  d1.add(perp.clone().multiplyScalar(spread)).normalize();
-  d2.add(perp.clone().multiplyScalar(-spread)).normalize();
-  d1.y -= 0.25; d2.y -= 0.25;
-  d1.normalize(); d2.normalize();
-  branch(end, d1, radius * 0.7, depth + 1, maxDepth);
-  branch(end, d2, radius * 0.7, depth + 1, maxDepth);
-}
-branch(new THREE.Vector3(-1.5, 0.15, 0), new THREE.Vector3(-0.6, -0.5, 0.2).normalize(), 0.16, 0, 2);
-branch(new THREE.Vector3(1.5, 0.15, 0), new THREE.Vector3(0.6, -0.5, -0.2).normalize(), 0.16, 0, 2);
+  tube([start.clone(), end.clone()], radius, STRUCTURES.bronchioles.color, 'bronchioles');
+  const newPath = pathSoFar.concat([end.clone()]);
 
-// Alveoli — clusters at bronchiole ends
-const alveoliGroup = new THREE.Group();
-scene.add(alveoliGroup);
+  if (depth >= maxDepth) {
+    terminals.push(end.clone());
+    treePaths.push(newPath);
+    return;
+  }
+
+  const spread = 0.55;
+  const up = new THREE.Vector3(0, 1, 0);
+  const perp = new THREE.Vector3().crossVectors(dir, up).normalize();
+  if (perp.lengthSq() < 0.01) perp.set(1, 0, 0);
+  const d1 = dir.clone().add(perp.clone().multiplyScalar(spread)).normalize();
+  const d2 = dir.clone().add(perp.clone().multiplyScalar(-spread)).normalize();
+  d1.y -= 0.18; d2.y -= 0.18;
+  d1.normalize(); d2.normalize();
+
+  branch(end, d1, radius * 0.72, depth + 1, maxDepth, newPath);
+  branch(end, d2, radius * 0.72, depth + 1, maxDepth, newPath);
+}
+
+const lobarEnds = [rUpperEnd, rMiddleEnd, rLowerEnd, lUpperEnd, lLowerEnd];
+const lobarDirs = [
+  new THREE.Vector3(0.5, 0.3, 0.3).normalize(),
+  new THREE.Vector3(0.6, -0.2, 0.1).normalize(),
+  new THREE.Vector3(0.4, -0.6, 0.2).normalize(),
+  new THREE.Vector3(-0.5, 0.3, -0.3).normalize(),
+  new THREE.Vector3(-0.4, -0.6, -0.2).normalize(),
+];
+const lobarPaths = [
+  [tracheaTop, carina, rightMainEnd, rUpperEnd],
+  [tracheaTop, carina, rightMainEnd, rMiddleEnd],
+  [tracheaTop, carina, rightMainEnd, rLowerEnd],
+  [tracheaTop, carina, leftMainEnd, lUpperEnd],
+  [tracheaTop, carina, leftMainEnd, lLowerEnd],
+];
+lobarEnds.forEach((end, i) => {
+  branch(end, lobarDirs[i], 0.13, 0, 3, lobarPaths[i]);
+});
+
+// ---------- Alveoli — anchored to the terminal bronchioles ----------
+const alveoliGeo = new THREE.SphereGeometry(0.07, 10, 8);
+const alveoliMat = makeMat(STRUCTURES.alveoli.color, { emissiveIntensity: 0.35, roughness: 0.3 });
 const alveoliSpheres = [];
-bronchioleEnds.forEach((end) => {
-  for (let i = 0; i < 6; i++) {
-    const s = new THREE.Mesh(
-      new THREE.SphereGeometry(0.09 + Math.random() * 0.05, 12, 10),
-      makeMat(STRUCTURES.alveoli.color, { emissiveIntensity: 0.35, roughness: 0.3 })
-    );
-    s.position.copy(end).add(new THREE.Vector3(
-      (Math.random() - 0.5) * 0.5,
-      (Math.random() - 0.5) * 0.5,
-      (Math.random() - 0.5) * 0.5
+
+terminals.forEach((term) => {
+  // alveolar duct: short connector from the terminal bronchiole
+  const ductEnd = term.clone().add(new THREE.Vector3(0, -0.16, 0));
+  tube([term, ductEnd], 0.05, STRUCTURES.bronchioles.color, 'bronchioles');
+  // cluster of alveoli anchored around the duct end
+  for (let i = 0; i < 5; i++) {
+    const s = new THREE.Mesh(alveoliGeo, alveoliMat);
+    s.position.copy(ductEnd).add(new THREE.Vector3(
+      (Math.random() - 0.5) * 0.34,
+      (Math.random() - 0.5) * 0.34,
+      (Math.random() - 0.5) * 0.34
     ));
-    alveoliGroup.add(s);
+    register('alveoli', s);
     alveoliSpheres.push(s);
-    s.userData.structure = 'alveoli';
   }
 });
-meshes['alveoli'] = alveoliSpheres;
-groups['alveoli'] = alveoliGroup;
 
-// --- Labels ---
+// ---------- Labels ----------
 function makeLabel(name) {
   const el = document.createElement('div');
   el.className = 'struct-label';
@@ -211,11 +292,11 @@ function makeLabel(name) {
 function labelPos(name) {
   const p = new THREE.Vector3();
   if (name === 'trachea') p.set(0, 2.6, 0);
-  else if (name === 'bronchi') p.set(0, 0.9, 0);
-  else if (name === 'bronchioles') p.set(0, -0.6, 0);
-  else if (name === 'alveoli') p.set(0, -1.6, 0);
-  else if (name === 'leftLung') p.set(-1.7, 0.4, 0);
-  else if (name === 'rightLung') p.set(1.7, 0.4, 0);
+  else if (name === 'bronchi') p.set(0, 0.8, 0);
+  else if (name === 'bronchioles') p.set(0, -0.4, 0);
+  else if (name === 'alveoli') p.set(0, -1.4, 0);
+  else if (name === 'leftLung') p.set(-1.55, 0.3, 0);
+  else if (name === 'rightLung') p.set(1.55, 0.3, 0);
   return p;
 }
 Object.keys(STRUCTURES).forEach((name) => {
@@ -232,7 +313,6 @@ function highlight(name, on = true) {
     if (on) {
       if (!originalEmissive[m.uuid]) originalEmissive[m.uuid] = m.material.emissiveIntensity;
       m.material.emissiveIntensity = 1.4;
-      m.material.opacity = Math.max(m.material.opacity, 0.95);
     } else {
       m.material.emissiveIntensity = originalEmissive[m.uuid] ?? 0.18;
     }
@@ -242,65 +322,92 @@ function clearHighlights() {
   Object.keys(meshes).forEach((n) => highlight(n, false));
 }
 
-// ---------- Camera focus ----------
-function focusOn(name, distance = 6) {
-  const target = labelPos(name);
+// ---------- Camera ----------
+function animateCameraTo(endPos, endTarget, dur = 900) {
   const start = camera.position.clone();
-  const end = target.clone().add(new THREE.Vector3(0, 0.5, distance));
   const startTarget = controls.target.clone();
   const t0 = performance.now();
-  const dur = 900;
   function step(now) {
     const t = Math.min((now - t0) / dur, 1);
     const e = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // easeInOut
-    camera.position.lerpVectors(start, end, e);
-    controls.target.lerpVectors(startTarget, target, e);
+    camera.position.lerpVectors(start, endPos, e);
+    controls.target.lerpVectors(startTarget, endTarget, e);
     controls.update();
     if (t < 1) requestAnimationFrame(step);
   }
   requestAnimationFrame(step);
 }
+function focusOn(name, distance = 6) {
+  const target = labelPos(name);
+  const end = target.clone().add(new THREE.Vector3(0, 0.5, distance));
+  animateCameraTo(end, target);
+}
 
-// ---------- Airflow particles ----------
+// ---------- Lung layer toggle ----------
+let lungLayerOn = true;
+let lungOpacity = 0.16;
+function setLungLayer(on) {
+  lungLayerOn = on;
+  document.getElementById('btn-lung').classList.toggle('active', on);
+}
+function updateLungOpacity() {
+  const dist = camera.position.distanceTo(controls.target);
+  const auto = THREE.MathUtils.clamp((dist - 2.5) / 7, 0.05, 1);
+  const target = lungLayerOn ? auto : 0;
+  lungOpacity += (target - lungOpacity) * 0.08;
+  lungMaterials.forEach((m) => {
+    m.opacity = lungOpacity * m.userData.baseOpacity;
+    m.visible = lungOpacity > 0.01;
+  });
+}
+
+// ---------- View presets ----------
+function goToView(view) {
+  if (view === 'outside') {
+    setLungLayer(true);
+    animateCameraTo(new THREE.Vector3(0, 2, 16), new THREE.Vector3(0, 0.3, 0));
+  } else if (view === 'airways') {
+    setLungLayer(false);
+    animateCameraTo(new THREE.Vector3(0, 1.2, 5), new THREE.Vector3(0, 0.5, 0));
+  } else if (view === 'alveoli') {
+    setLungLayer(false);
+    animateCameraTo(new THREE.Vector3(0, -1.2, 3), new THREE.Vector3(0, -1.2, 0));
+  }
+}
+
+// ---------- Airflow particles (follow real bronchial pathways) ----------
+const airflowCurves = treePaths.map((p) => new THREE.CatmullRomCurve3(p));
 const particles = [];
 const particleGroup = new THREE.Group();
 scene.add(particleGroup);
-const particleGeo = new THREE.SphereGeometry(0.05, 8, 8);
+const particleGeo = new THREE.SphereGeometry(0.035, 8, 8);
 const particleMat = new THREE.MeshBasicMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.9 });
 
-const airflowPath = [
-  new THREE.Vector3(0, 3.4, 0),
-  new THREE.Vector3(0, 2.6, 0),
-  new THREE.Vector3(0, 1.8, 0),
-  new THREE.Vector3(0, 1.0, 0),
-  new THREE.Vector3(-0.7, 0.55, 0),
-  new THREE.Vector3(-1.5, 0.15, 0),
-  new THREE.Vector3(-1.8, -0.4, 0),
-  new THREE.Vector3(-1.9, -1.2, 0),
-  new THREE.Vector3(-1.9, -1.7, 0),
-];
-const airflowCurve = new THREE.CatmullRomCurve3(airflowPath);
 let airflowActive = false;
-let airflowTime = 0;
 
 function spawnParticle() {
   const p = new THREE.Mesh(particleGeo, particleMat);
-  p.userData.t = Math.random() * 0.15;
-  p.userData.speed = 0.12 + Math.random() * 0.06;
+  p.userData.curveIndex = Math.floor(Math.random() * airflowCurves.length);
+  p.userData.t = Math.random();
+  p.userData.speed = 0.15 + Math.random() * 0.08;
   particleGroup.add(p);
   particles.push(p);
 }
-for (let i = 0; i < 40; i++) spawnParticle();
+for (let i = 0; i < 60; i++) spawnParticle();
 
 function updateAirflow(dt) {
   if (!airflowActive) { particleGroup.visible = false; return; }
   particleGroup.visible = true;
   particles.forEach((p) => {
     p.userData.t += p.userData.speed * dt;
-    if (p.userData.t > 1) p.userData.t = 0;
-    const pos = airflowCurve.getPointAt(p.userData.t);
+    if (p.userData.t > 1) {
+      p.userData.t = 0;
+      p.userData.curveIndex = Math.floor(Math.random() * airflowCurves.length);
+    }
+    const curve = airflowCurves[p.userData.curveIndex];
+    const pos = curve.getPointAt(p.userData.t);
     p.position.copy(pos);
-    const scale = 0.6 + 0.8 * Math.sin(p.userData.t * Math.PI);
+    const scale = 0.5 + 0.7 * Math.sin(p.userData.t * Math.PI);
     p.scale.setScalar(scale);
   });
 }
@@ -380,6 +487,9 @@ function matchIntent(text) {
   if (/trachea|windpipe/.test(t)) return 'trachea';
   if (/left lung/.test(t)) return 'leftLung';
   if (/right lung/.test(t)) return 'rightLung';
+  if (/hide.*lung|lung.*off|remove.*lung|hide.*tissue/.test(t)) return 'hideLungs';
+  if (/show.*lung|lung.*on|restore.*lung/.test(t)) return 'showLungs';
+  if (/inside|enter.*lung|take me inside|airway view/.test(t)) return 'inside';
   if (/lung/.test(t)) return 'leftLung';
   if (/airflow|air travel|path air|how air|breathe|inhale/.test(t)) return 'airflow';
   if (/teach|lesson|tour|guide/.test(t)) return 'teach';
@@ -388,10 +498,10 @@ function matchIntent(text) {
 
 const RESPONSES = {
   trachea: 'The trachea is the windpipe — a rigid, cartilage-reinforced tube that carries air from your throat down into the chest. I\'ve highlighted it and moved the camera in. It then splits into the two main bronchi at the carina.',
-  bronchi: 'These are the main bronchi — the two large branches of the trachea, one to each lung. They conduct air deeper into the lungs and keep dividing into smaller bronchi. I\'ve highlighted them for you.',
+  bronchi: 'These are the bronchi — the main bronchi split into lobar bronchi (three on the right, two on the left) and then segmental bronchi, conducting air deeper into each lobe. I\'ve highlighted the branching network.',
   bronchioles: 'Bronchioles are the smallest conducting airways, under about 1 mm wide. They branch repeatedly and end in terminal bronchioles that deliver air to the alveoli. I\'ve highlighted the branching network.',
   alveoli: 'Alveoli are tiny air sacs — about 300 million per lung — wrapped in a dense web of capillaries. This is where gas exchange happens: oxygen diffuses into the blood and carbon dioxide diffuses out. I\'ve highlighted the alveolar clusters.',
-  leftLung: 'The left lung has two lobes and is slightly smaller to make room for the heart. It receives air through the left main bronchus. I\'ve highlighted it.',
+  leftLung: 'The left lung has two lobes and a cardiac notch to make room for the heart. It receives air through the left main bronchus. I\'ve highlighted it.',
   rightLung: 'The right lung has three lobes and is larger than the left. It receives air through the right main bronchus. I\'ve highlighted it.',
 };
 
@@ -400,12 +510,27 @@ async function handleUserInput(text) {
   const intent = matchIntent(text);
 
   if (intent === 'airflow') {
-    await runAgentSteps('bronchi', 'Air travels: trachea → main bronchi → bronchioles → alveoli. I\'ve started the airflow animation so you can watch the path air takes as you inhale.');
+    await runAgentSteps('bronchi', 'Air travels: trachea → main bronchi → lobar bronchi → segmental bronchi → bronchioles → alveolar ducts → alveoli. I\'ve started the airflow animation so you can watch the path air takes as you inhale.');
     startAirflow();
     return;
   }
   if (intent === 'teach') {
     startTeach();
+    return;
+  }
+  if (intent === 'hideLungs') {
+    setLungLayer(false);
+    await runAgentSteps('bronchi', 'I\'ve hidden the lung tissue so you can see the internal airway tree clearly — trachea, bronchi, and bronchioles.');
+    return;
+  }
+  if (intent === 'showLungs') {
+    setLungLayer(true);
+    await runAgentSteps('leftLung', 'I\'ve restored the lung tissue so you can see the full pulmonary system from the outside.');
+    return;
+  }
+  if (intent === 'inside') {
+    setLungLayer(false);
+    await runAgentSteps('bronchi', 'I\'ve taken you inside the lungs. You can now see the branching airway tree — trachea, bronchi, and bronchioles.');
     return;
   }
   if (intent && RESPONSES[intent]) {
@@ -419,7 +544,7 @@ async function handleUserInput(text) {
   setActivity(ACTIVITY_STEPS.slice(0, 3));
   await sleep(400);
   setActivity(ACTIVITY_STEPS.slice(0, 6));
-  addMessage('agent', 'I can help you explore the respiratory system. Try asking me to "show me the bronchi", "explain the alveoli", "show me the path air takes", or press "Teach Me" for a guided tour.');
+  addMessage('agent', 'I can help you explore the respiratory system. Try asking me to "show me the bronchi", "explain the alveoli", "show me the path air takes", "hide the lungs", or "take me inside" — or press "Teach Me" for a guided tour.');
   setTimeout(resetActivity, 2500);
 }
 
@@ -446,7 +571,7 @@ document.getElementById('btn-airflow').addEventListener('click', () => {
 // ---------- Teach Me ----------
 const LESSONS = [
   { name: 'trachea', title: '1. Trachea', text: 'Air enters through your nose or mouth and travels down the trachea (windpipe), a rigid tube kept open by rings of cartilage.' },
-  { name: 'bronchi', title: '2. Bronchi', text: 'At the carina, the trachea splits into the left and right main bronchi — one for each lung. These keep dividing into smaller bronchi.' },
+  { name: 'bronchi', title: '2. Bronchi', text: 'At the carina, the trachea splits into the left and right main bronchi — one for each lung. These divide into lobar and segmental bronchi.' },
   { name: 'bronchioles', title: '3. Bronchioles', text: 'The bronchi branch into ever-smaller bronchioles, the finest conducting airways, which spread air throughout the lungs.' },
   { name: 'alveoli', title: '4. Alveoli', text: 'Bronchioles end in clusters of alveoli — tiny air sacs wrapped in capillaries. This is where the lungs meet the bloodstream.' },
   { name: 'alveoli', title: '5. Gas exchange', text: 'In the alveoli, oxygen diffuses into the blood while carbon dioxide diffuses out — the essential gas exchange that keeps you alive.' },
@@ -494,8 +619,9 @@ document.getElementById('btn-reset').addEventListener('click', () => {
   stopAirflow();
   stopTeach();
   clearHighlights();
+  setLungLayer(true);
   camera.position.set(0, 2, 16);
-  controls.target.set(0, 0.5, 0);
+  controls.target.set(0, 0.3, 0);
   controls.update();
 });
 
@@ -505,6 +631,20 @@ document.getElementById('btn-labels').addEventListener('click', () => {
   labelsOn = !labelsOn;
   Object.values(labels).forEach((l) => (l.element.style.display = labelsOn ? '' : 'none'));
   document.getElementById('btn-labels').classList.toggle('active', !labelsOn);
+});
+
+// ---------- Lung layer button ----------
+document.getElementById('btn-lung').addEventListener('click', () => {
+  setLungLayer(!lungLayerOn);
+});
+
+// ---------- View switcher ----------
+document.querySelectorAll('.view-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.view-btn').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    goToView(btn.dataset.view);
+  });
 });
 
 // ---------- Chat wiring ----------
@@ -549,8 +689,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.1);
   controls.update();
   updateAirflow(dt);
-  // gentle idle rotation of alveoli glow
-  alveoliGroup.rotation.y += dt * 0.05;
+  updateLungOpacity();
   composer.render();
   labelRenderer.render(scene, camera);
 }
@@ -567,4 +706,4 @@ window.addEventListener('resize', () => {
 });
 
 // ---------- Welcome ----------
-addMessage('agent', 'Hi! I\'m Agent8088. I can see this 3D model of the respiratory system and control it for you.\n\nAsk me to "show me the bronchi", "explain the alveoli", or "show me the path air takes" — or press "Teach Me" for a guided tour.');
+addMessage('agent', 'Hi! I\'m Agent8088. I can see this 3D model of the respiratory system and control it for you.\n\nAsk me to "show me the bronchi", "explain the alveoli", "show me the path air takes", "hide the lungs", or "take me inside" — or press "Teach Me" for a guided tour.');
